@@ -27,6 +27,11 @@ struct Traits {
         GMMA::ss_op_selector<InputT, InputT, float, Shape<Int<BLOCK_SIZE_M>, Int<PAGE_BLOCK_SIZE>, Int<HEAD_DIM_K>>, GMMA::Major::K, GMMA::Major::K>(),
         Layout<Shape<_1, _1, _1>>{}
     ));
+    // using MMA_Atom_Arch = MMA_Atom<SM80_16x8x16_F32BF16BF16F32_TN>;
+    // using TiledMMA_QK_sQ = TiledMMA<
+    //     MMA_Atom_Arch,
+    //     Layout<Shape<Int<4>,_1,_1>>,  // 4x1x1 or 8x1x1 thread group
+    //     Tile<Int<16 * 4>, _16, _16>>;
 
     using TiledMMA_QK_rQ = decltype(make_tiled_mma(
         GMMA::rs_op_selector<InputT, InputT, float, Shape<Int<BLOCK_SIZE_M>, Int<PAGE_BLOCK_SIZE>, Int<HEAD_DIM_K>>, GMMA::Major::K, GMMA::Major::K>(),
@@ -37,6 +42,10 @@ struct Traits {
         GMMA::rs_op_selector<InputT, InputT, float, Shape<Int<BLOCK_SIZE_M>, Int<HEAD_DIM_V/2>, Int<PAGE_BLOCK_SIZE>>, GMMA::Major::K, GMMA::Major::MN>(),
         Layout<Shape<_1, _1, _1>>{}
     ));
+
+    // using TiledMMA_PV_LocalP = decltype(make_tiled_mma(
+    //     SM80_16x8x8_F32F16F16F32_TN{},
+    //     Layout<Shape<_4, _32, _8>>{}));
 
     using TiledMMA_PV_RemoteP = decltype(make_tiled_mma(
         GMMA::ss_op_selector<InputT, InputT, float, Shape<Int<BLOCK_SIZE_M>, Int<HEAD_DIM_V/2>, Int<PAGE_BLOCK_SIZE>>, GMMA::Major::K, GMMA::Major::MN>(),

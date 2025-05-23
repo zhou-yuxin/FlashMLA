@@ -2562,12 +2562,13 @@ public:
         // 1 warp uses ldmatrix.m8n8.x4 to load 16x16 of matrix A,
         // and 4x1 warps loads 64x16 of matrix A.
         if constexpr(K_Major) {
-            // below row/col are in unit of cells
+            // below row/col are in unit of 16B cells
             uint8_t row = warp * 16 + tid % 16;         // row 0-63 to load by ldmatrix
             uint8_t col = tid / 16;                     // col 0-1 to load by ldmatrix
             uint32_t ptr = get_ptr(desc_a, row, col);
-            asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" :
-                "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3) : "r"(ptr));
+            asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                : "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3)
+                : "r"(ptr));
         }
         else {
             // uint8_t row = warp * 16 + tid & 0x8;        // row 0,8,16,..., 56 to load by ldmatrix
@@ -2578,34 +2579,68 @@ public:
         }
     }
 
-    // // load 16x8 matrix B
-    // void inline __host__ __device__ load_b(uint64_t const& desc_a,
-    //         uint32_t& a0, uint32_t& a1, uint32_t& a2, uint32_t& a3) {
-    //     // 1 warp uses ldmatrix.m8n8.x4 to load 16x16 of matrix A,
-    //     // and 4x1 warps loads 64x16 of matrix A.
-    //     uint8_t row = warp * 16 + tid % 16;         // row 0-63 to load by ldmatrix
-    //     uint8_t col = tid / 16;                     // col 0-1 to load by ldmatrix
-    //     uint32_t ptr = get_ptr(desc_a, row, col);
-    //     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" :
-    //         "=r"(a0), "=r"(a1), "=r"(a2), "=r"(a3) : "r"(ptr));
-    // }
+    // load 16x8 matrix B from smem to registers
+    template <bool K_Major = true>
+    void inline __host__ __device__ load_b(uint64_t const& desc_b, uint8_t ni,
+            uint32_t& b0, uint32_t& b1) {
+        // 4 warp uses ldmatrix.m8n8.x2 to load the same 16x8 of matrix B.
+        // ldmatrix.x2 only use addresses from thread 0-15.
+        if constexpr(K_Major) {
+            uint8_t row = tid / 8;                      // row 0-1 to load by ldmatrix
+            uint8_t col = ni + tid % 8;                 // col 0-(N-1) to load by ldmatrix
+            uint32_t ptr = get_ptr(desc_b, col, row);
+            asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n"
+                : "=r"(b0), "=r"(b1)
+                : "r"(ptr));
+        }
+        else {
+            uint8_t row = (ni / 64) * 64 + tid;
+            uint8_t col = (ni / 8) % 8;
+            uint32_t ptr = get_ptr(desc_b, row, col);
+            asm volatile("ldmatrix.sync.aligned.m8n8.x2.trans.shared.b16 {%0, %1}, [%2];\n"
+                : "=r"(b0), "=r"(b1)
+                : "r"(ptr));
+#if 0
+            printf("smem_base: %x, tid: %u, row: %u, col: %u\n",
+                uint32_t(desc_b & 0x3fff), threadIdx.x, uint32_t(row), uint32_t(col));
+#endif
+        }
+    }
 
-    // load 16x8 matrix B and calculate 64x8 C = A x B
+    // load 16x16 matrix B from smem to registers
+    template <bool K_Major = true>
+    void inline __host__ __device__ load_b(uint64_t const& desc_b, uint8_t ni,
+            uint32_t& b0, uint32_t& b1, uint32_t& b2, uint32_t& b3) {
+        // 4 warp uses ldmatrix.m8n8.x4 to load the same 16x16 of matrix B.
+        if constexpr(K_Major) {
+            uint8_t row = tid / 8 % 2;                  // row 0-1 to load by ldmatrix
+            uint8_t col = ni + tid / 16 * 8 + tid % 8;  // col 0-(N-1) to load by ldmatrix
+            uint32_t ptr = get_ptr(desc_b, col, row);
+            asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3)
+                : "r"(ptr));
+        }
+        else {
+            uint8_t row = (ni / 64) * 64 + tid % 16;
+            uint8_t col = (ni / 8) % 8 + tid / 16;
+            uint32_t ptr = get_ptr(desc_b, row, col);
+            asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n"
+                : "=r"(b0), "=r"(b1), "=r"(b2), "=r"(b3)
+                : "r"(ptr));
+#if 0
+            printf("smem_base: %x, tid: %u, row: %u, col: %u\n",
+                uint32_t(desc_b & 0x3fff), threadIdx.x, uint32_t(row), uint32_t(col));
+#endif
+        }
+    }
+
+    // calculate 64x8 C = A x B
     template <typename T = bf16_t>
-    void inline __host__ __device__ step_b(
+    void inline __host__ __device__ operator()(
             uint32_t const& a0, uint32_t const& a1, uint32_t const& a2, uint32_t const& a3,
-            uint64_t const& desc_b, uint8_t ni,
+            uint32_t const& b0, uint32_t const& b1,
             float& d0, float& d1, float& d2, float& d3,
             bool clear = false) {
-        // 4 warp uses ldmatrix.m8n8.x2 to load the same 16x8 of matrix B,
-        // and use mma.m16n8k16 to calculate 64x8 matrix C.
-        uint8_t row = tid / 8;                      // row 0-1 to load by ldmatrix
-                                                    // PS: ldmatrix.x2 only use addresses from thread 0-15
-        uint8_t col = ni + tid % 8;                 // col 0-(N-1) to load by ldmatrix
-        uint32_t ptr = get_ptr(desc_b, col, row);   // above row/col is in a transposed B
-        uint32_t b0, b1;                            // fragment of 16x8 matrix B
-        asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];\n" :
-            "=r"(b0), "=r"(b1) : "r"(ptr));
         if (clear) {
             d0 = 0;
             d1 = 0;
@@ -2626,6 +2661,7 @@ public:
         }
         GENERATE_PTX(bf16_t, "bf16")
         GENERATE_PTX(fp16_t, "fp16")
+#undef GENERATE_PTX
     }
 
 private:
@@ -2680,21 +2716,30 @@ struct MMA_64x64x16_F32BF16BF16_SS
   {
 #if 1
     SM80_HGMMA_FP32Acc mma;
+    bool clear = scale_D == GMMA::ScaleOut::Zero;
     uint32_t a0, a1, a2, a3;
     mma.load_a(desc_a, a0, a1, a2, a3);
-    bool clear = scale_D == GMMA::ScaleOut::Zero;
-    mma.step_b(a0, a1, a2, a3, desc_b, 0, d00, d01, d02, d03, clear);
-    mma.step_b(a0, a1, a2, a3, desc_b, 8, d04, d05, d06, d07, clear);
-    mma.step_b(a0, a1, a2, a3, desc_b, 16, d08, d09, d10, d11, clear);
-    mma.step_b(a0, a1, a2, a3, desc_b, 24, d12, d13, d14, d15, clear);
-    mma.step_b(a0, a1, a2, a3, desc_b, 32, d16, d17, d18, d19, clear);
-    mma.step_b(a0, a1, a2, a3, desc_b, 40, d20, d21, d22, d23, clear);
-    mma.step_b(a0, a1, a2, a3, desc_b, 48, d24, d25, d26, d27, clear);
-    mma.step_b(a0, a1, a2, a3, desc_b, 56, d28, d29, d30, d31, clear);
+
+    uint32_t b0, b1, b2, b3;
+
+    mma.load_b(desc_b, 0, b0, b1, b2, b3);
+    mma(a0, a1, a2, a3, b0, b1, d00, d01, d02, d03, clear);
+    mma(a0, a1, a2, a3, b2, b3, d04, d05, d06, d07, clear);
+
+    mma.load_b(desc_b, 16, b0, b1, b2, b3);
+    mma(a0, a1, a2, a3, b0, b1, d08, d09, d10, d11, clear);
+    mma(a0, a1, a2, a3, b2, b3, d12, d13, d14, d15, clear);
+
+    mma.load_b(desc_b, 32, b0, b1, b2, b3);
+    mma(a0, a1, a2, a3, b0, b1, d16, d17, d18, d19, clear);
+    mma(a0, a1, a2, a3, b2, b3, d20, d21, d22, d23, clear);
+
+    mma.load_b(desc_b, 48, b0, b1, b2, b3);
+    mma(a0, a1, a2, a3, b0, b1, d24, d25, d26, d27, clear);
+    mma(a0, a1, a2, a3, b2, b3, d28, d29, d30, d31, clear);
+
     return;
 #endif
-    // float d[4] = {0};
-    // mma.step_b(desc_b, 0, d[0], d[1], d[2], d[3]);
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
     cutlass::arch::synclog_emit_wgmma_smem_smem(__LINE__, desc_a, desc_b);
     asm volatile(
@@ -3483,8 +3528,92 @@ struct MMA_64x256x16_F32BF16BF16_RS
       float         & d124, float         & d125, float         & d126, float         & d127,
       GMMA::ScaleOut const scale_D = GMMA::ScaleOut::One)
   {
-    // if(threadIdx.x == 0)
-    // printf("MMA_64x256x16_F32BF16BF16_RS\n");
+#if 1
+    // if(threadIdx.x == 0) printf("MMA_64x256x16_F32BF16BF16_RS\n");
+    bool clear = scale_D == GMMA::ScaleOut::Zero;
+    SM80_HGMMA_FP32Acc mma;
+    uint32_t b0, b1, b2, b3;
+
+   mma.load_b<false>(desc_b, 0, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d000, d001, d002, d003, clear);
+    mma(a000, a001, a002, a003, b2, b3, d004, d005, d006, d007, clear);
+    
+
+    mma.load_b<false>(desc_b, 16, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d008, d009, d010, d011, clear);
+    mma(a000, a001, a002, a003, b2, b3, d012, d013, d014, d015, clear);
+    
+
+    mma.load_b<false>(desc_b, 32, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d016, d017, d018, d019, clear);
+    mma(a000, a001, a002, a003, b2, b3, d020, d021, d022, d023, clear);
+    
+
+    mma.load_b<false>(desc_b, 48, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d024, d025, d026, d027, clear);
+    mma(a000, a001, a002, a003, b2, b3, d028, d029, d030, d031, clear);
+    
+
+    mma.load_b<false>(desc_b, 64, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d032, d033, d034, d035, clear);
+    mma(a000, a001, a002, a003, b2, b3, d036, d037, d038, d039, clear);
+    
+
+    mma.load_b<false>(desc_b, 80, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d040, d041, d042, d043, clear);
+    mma(a000, a001, a002, a003, b2, b3, d044, d045, d046, d047, clear);
+    
+
+    mma.load_b<false>(desc_b, 96, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d048, d049, d050, d051, clear);
+    mma(a000, a001, a002, a003, b2, b3, d052, d053, d054, d055, clear);
+    
+
+    mma.load_b<false>(desc_b, 112, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d056, d057, d058, d059, clear);
+    mma(a000, a001, a002, a003, b2, b3, d060, d061, d062, d063, clear);
+    
+
+    mma.load_b<false>(desc_b, 128, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d064, d065, d066, d067, clear);
+    mma(a000, a001, a002, a003, b2, b3, d068, d069, d070, d071, clear);
+    
+
+    mma.load_b<false>(desc_b, 144, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d072, d073, d074, d075, clear);
+    mma(a000, a001, a002, a003, b2, b3, d076, d077, d078, d079, clear);
+    
+
+    mma.load_b<false>(desc_b, 160, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d080, d081, d082, d083, clear);
+    mma(a000, a001, a002, a003, b2, b3, d084, d085, d086, d087, clear);
+    
+
+    mma.load_b<false>(desc_b, 176, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d088, d089, d090, d091, clear);
+    mma(a000, a001, a002, a003, b2, b3, d092, d093, d094, d095, clear);
+    
+
+    mma.load_b<false>(desc_b, 192, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d096, d097, d098, d099, clear);
+    mma(a000, a001, a002, a003, b2, b3, d100, d101, d102, d103, clear);
+    
+
+    mma.load_b<false>(desc_b, 208, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d104, d105, d106, d107, clear);
+    mma(a000, a001, a002, a003, b2, b3, d108, d109, d110, d111, clear);
+    
+
+    mma.load_b<false>(desc_b, 224, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d112, d113, d114, d115, clear);
+    mma(a000, a001, a002, a003, b2, b3, d116, d117, d118, d119, clear);
+    
+
+    mma.load_b<false>(desc_b, 240, b0, b1, b2, b3);
+    mma(a000, a001, a002, a003, b0, b1, d120, d121, d122, d123, clear);
+    mma(a000, a001, a002, a003, b2, b3, d124, d125, d126, d127, clear);
+    return;
+#endif
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
     cutlass::arch::synclog_emit_wgmma_reg_smem(__LINE__, desc_b);
     asm volatile(

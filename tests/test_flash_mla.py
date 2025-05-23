@@ -6,7 +6,7 @@ import torch
 import triton
 
 from flash_mla import flash_mla_with_kvcache, get_mla_metadata
-
+import time
 
 def scaled_dot_product_attention(query, key, value, h_q, h_kv, is_causal=False):
     query = query.float()
@@ -64,6 +64,19 @@ def test_flash_mla(b, s_q, mean_sk, h_q, h_kv, d, dv, causal, varlen):
             float("nan")
         )
     blocked_v = blocked_k[..., :dv]
+
+    # print(q.shape)
+    # for row in range(64):
+    #     print("\t".join(map(lambda x: "%.4f" % x, q[0, 0, row])))
+
+    # print(q.shape)
+    # print(blocked_k.shape)
+    # seqlen = cache_seqlens[0]
+    # k = blocked_k.view(-1, d)[: seqlen]
+    # print(k.shape)
+    # for row in range(128):
+    #     print("\t".join(map(lambda x: "%.4f" % x, k[row])))
+    # exit(0)
 
     tile_scheduler_metadata, num_splits = get_mla_metadata(
         cache_seqlens, s_q * h_q // h_kv, h_kv
@@ -132,7 +145,8 @@ def main(torch_dtype):
                 for s_q in [1, 2]:  # MTP = 1, 2
                     for varlen in [False, True]:
                         test_flash_mla(b, s_q, s, h_q, h_kv, d, dv, causal, varlen)
-
+    # test_flash_mla(b=1, s_q=1, mean_sk=128, h_q=64, h_kv=h_kv,
+    #         d=d, dv=dv, causal=False, varlen=False)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
